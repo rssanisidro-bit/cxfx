@@ -12,7 +12,7 @@ from kivy.uix.boxlayout import BoxLayout
 from kivy.lang import Builder
 from kivy.metrics import dp, sp
 from kivy.core.clipboard import Clipboard
-from kivy.clock import Clock
+from kivy.clock import Clock, mainthread
 from kivy.uix.popup import Popup
 from kivy.uix.button import Button
 from kivy.uix.label import Label
@@ -174,6 +174,25 @@ def get_android_wifi_ip():
     except Exception:
         return None
     return None
+
+def acquire_android_multicast_lock():
+    """Keep Wi-Fi broadcast discovery alive on Android when the system is saving power."""
+    if platform != "android":
+        return None
+    try:
+        from jnius import autoclass
+        PythonActivity = autoclass("org.kivy.android.PythonActivity")
+        Context = autoclass("android.content.Context")
+        activity = PythonActivity.mActivity
+        wifi = activity.getApplicationContext().getSystemService(Context.WIFI_SERVICE)
+        if not wifi:
+            return None
+        lock = wifi.createMulticastLock("LanCodeShareDiscovery")
+        lock.setReferenceCounted(True)
+        lock.acquire()
+        return lock
+    except Exception:
+        return None
 
 KV_STRING = '''
 #:import dp kivy.metrics.dp
@@ -440,7 +459,7 @@ KV_STRING = '''
                 spacing: dp(6)
                 TextInput:
                     id: manual_ip_input
-                    hint_text: "输入对方IP"
+                    hint_text: "IP 或 IP:端口"
                     multiline: False
                     font_size: sp(11)
                     background_color: 0.05, 0.07, 0.10, 1
@@ -643,6 +662,39 @@ def is_valid_ipv4(ip):
     except OSError:
         return False
 
+def parse_peer_address(raw):
+    """Parse manual peer input as IPv4 or IPv4:port. Returns (ip, port) or None."""
+    value = (raw or "").strip().replace(" ", "").replace("\uff1a", ":")
+    value = re.sub(r"^https?://", "", value, flags=re.IGNORECASE)
+    value = value.split("/", 1)[0]
+    if not value:
+        return None
+
+    port = TCP_PORT
+    ip = value
+    if ":" in value:
+        ip, port_text = value.rsplit(":", 1)
+        if not port_text.isdigit():
+            return None
+        port = int(port_text)
+        if port < 1 or port > 65535:
+            return None
+
+    if not is_valid_ipv4(ip):
+        return None
+    return ip, port
+
+
+def get_broadcast_targets(ip):
+    """Return global and subnet broadcast targets for more reliable discovery."""
+    targets = ["255.255.255.255"]
+    if is_valid_ipv4(ip):
+        parts = ip.split(".")
+        subnet_target = ".".join(parts[:3] + ["255"])
+        if subnet_target not in targets:
+            targets.append(subnet_target)
+    return targets
+
 def sanitize_filename(filename):
     """把收到的文件名限制为安全的普通文件名"""
     filename = os.path.basename((filename or "code.py").strip())
@@ -711,6 +763,7 @@ class RootWidget(BoxLayout):
         self.username = f"用户_{os.getpid()}"
         self.local_ip = get_local_ip()
         self.save_dir = default_save_dir()
+        self.multicast_lock = acquire_android_multicast_lock()
 
         # 在线成员管理
         self.peers = {}
@@ -1121,16 +1174,30 @@ class RootWidget(BoxLayout):
         if timeout_ips:
             self._refresh_peer_list_ui()
 
+    @mainthread
     def _refresh_peer_list_ui(self):
-        """刷新在线成员列表界面"""
+        """Refresh peer list using simple Buttons for Android stability."""
         peer_list = self.ids.peer_list_box
         peer_list.clear_widgets()
         with self.peers_lock:
-            peers_snapshot = list(self.peers.items())
+            peers_snapshot = sorted(
+                self.peers.items(),
+                key=lambda item: (item[1].get("manual", False), item[1].get("name", ""), item[0])
+            )
+
+        selected_name = None
+        for ip, info in peers_snapshot:
+            if ip == self.selected_peer_ip:
+                selected_name = info.get("name", f"\u8bbe\u5907 {ip}")
+                break
+        if selected_name:
+            self.ids.selected_peer_label.text = f"\u5df2\u9009\u62e9\uff1a{selected_name}"
+        elif not self.selected_peer_ip:
+            self.ids.selected_peer_label.text = "\uff08\u672a\u9009\u62e9\uff09"
 
         if not peers_snapshot:
             empty_label = Label(
-                text="暂无在线成员",
+                text="\u6682\u65e0\u5728\u7ebf\u6210\u5458",
                 color=(0.5, 0.55, 0.65, 1),
                 font_size=sp(11),
                 size_hint_y=None,
@@ -1141,81 +1208,108 @@ class RootWidget(BoxLayout):
             peer_list.add_widget(empty_label)
         else:
             for ip, info in peers_snapshot:
-                display_name = f"{info['name']}\n{ip}"
-                btn = ToggleButton(
+                name = info.get("name", f"\u8bbe\u5907 {ip}")
+                port = int(info.get("port", TCP_PORT) or TCP_PORT)
+                address = f"{ip}:{port}" if port != TCP_PORT else ip
+                display_name = f"{name}\n{address}"
+                selected = ip == self.selected_peer_ip
+                btn = Button(
                     text=display_name,
                     size_hint_y=None,
-                    height=dp(42),
-                    background_color=(0.15, 0.2, 0.3, 1),
-                    background_down=(0.31, 0.55, 1, 1),
-                    color=(0.9, 0.95, 1, 1),
+                    height=dp(46),
+                    background_normal="",
+                    background_color=(0.31, 0.55, 1, 1) if selected else (0.15, 0.20, 0.30, 1),
+                    color=(1, 1, 1, 1) if selected else (0.88, 0.94, 1, 1),
                     font_size=sp(11),
-                    group="peer_group"
+                    halign="center",
+                    valign="middle"
                 )
-                if ip == self.selected_peer_ip:
-                    btn.state = "down"
-                btn.bind(on_release=lambda b, ip=ip, name=info["name"]: self._select_peer(ip, name))
+                btn.text_size = (dp(170), None)
+                btn.bind(on_release=lambda _btn, ip=ip, name=name: self._select_peer(ip, name))
                 peer_list.add_widget(btn)
 
-        self.ids.peer_count_label.text = f"在线 {len(peers_snapshot)} 人"
+        self.ids.peer_count_label.text = f"\u5728\u7ebf {len(peers_snapshot)} \u4eba"
 
+    @mainthread
     def _select_peer(self, ip, name):
-        """选中接收方设备"""
+        """Select a receiver device."""
         self.selected_peer_ip = ip
-        self.ids.selected_peer_label.text = f"已选择：{name}"
-        self.add_log(f"选中接收方：{name} ({ip})")
+        self.ids.selected_peer_label.text = f"\u5df2\u9009\u62e9\uff1a{name}"
+        self._refresh_peer_list_ui()
+        self.add_log(f"\u9009\u4e2d\u63a5\u6536\u65b9\uff1a{name} ({ip})")
 
     def add_manual_peer(self):
-        """手动添加接收方IP，作为UDP发现失败时的备用连接方式"""
-        ip = self.ids.manual_ip_input.text.strip()
-        if not is_valid_ipv4(ip):
-            self.add_log("请输入正确的IPv4地址，例如 192.168.1.23")
-            return
-        if ip == self.local_ip:
-            self.add_log("不能把本机IP添加为接收方")
+        """Add a manual receiver as fallback when discovery is unavailable."""
+        parsed = parse_peer_address(self.ids.manual_ip_input.text)
+        if not parsed:
+            self.add_log("\u8bf7\u8f93\u5165\u6b63\u786e\u7684\u5730\u5740\uff0c\u4f8b\u5982 192.168.1.23 \u6216 192.168.1.23:18889")
             return
 
-        name = f"手动设备 {ip}"
+        ip, port = parsed
+        if ip == self.local_ip:
+            self.add_log("\u4e0d\u80fd\u628a\u672c\u673a IP \u6dfb\u52a0\u4e3a\u63a5\u6536\u65b9")
+            return
+
+        name = f"\u624b\u52a8\u8bbe\u5907 {ip}"
         with self.peers_lock:
+            old = self.peers.get(ip, {})
+            peer_name = old.get("name") or name
             self.peers[ip] = {
-                "name": name,
-                "port": TCP_PORT,
+                "name": peer_name,
+                "port": port,
                 "last_seen": time.time(),
                 "manual": True
             }
 
         self.selected_peer_ip = ip
-        self.ids.selected_peer_label.text = f"已选择：{name}"
+        self.ids.manual_ip_input.text = f"{ip}:{port}" if port != TCP_PORT else ip
+        self.ids.selected_peer_label.text = f"\u5df2\u9009\u62e9\uff1a{peer_name}"
         self._refresh_peer_list_ui()
-        self.add_log(f"已手动添加接收方：{ip}")
+        self.add_log(f"\u5df2\u6dfb\u52a0\u5907\u7528\u63a5\u6536\u65b9\uff1a{ip}:{port}")
 
-    # ---------- UDP设备发现 ----------
     def _udp_broadcast_sender(self):
-        """UDP广播发送线程：定时广播本机信息"""
+        """Broadcast local device info to both global and subnet broadcast addresses."""
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        except Exception:
+            pass
+
         while self.running:
             try:
-                data = json.dumps({
+                current_ip = get_local_ip()
+                if is_valid_ipv4(current_ip) and not current_ip.startswith("127."):
+                    self.local_ip = current_ip
+
+                payload = json.dumps({
+                    "app": "lan-code-share",
+                    "version": 2,
+                    "kind": "announce",
                     "name": self.username,
                     "ip": self.local_ip,
                     "port": TCP_PORT
                 }).encode(ENCODING)
-                sock.sendto(data, ("255.255.255.255", BROADCAST_PORT))
+
+                for target in get_broadcast_targets(self.local_ip):
+                    try:
+                        sock.sendto(payload, (target, BROADCAST_PORT))
+                    except Exception:
+                        continue
             except Exception:
                 pass
-            time.sleep(BROADCAST_INTERVAL)
+            time.sleep(max(1, BROADCAST_INTERVAL))
         sock.close()
 
     def _udp_broadcast_receiver(self):
-        """UDP广播接收线程：发现其他在线设备"""
+        """Receive broadcast announcements and keep nearby devices updated."""
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             sock.bind(("", BROADCAST_PORT))
             sock.settimeout(1)
         except Exception as e:
-            self.add_log(f"设备发现服务启动失败：{e}")
+            self.add_log(f"\u8bbe\u5907\u53d1\u73b0\u670d\u52a1\u542f\u52a8\u5931\u8d25\uff1a{e}")
             sock.close()
             return
 
@@ -1223,24 +1317,43 @@ class RootWidget(BoxLayout):
             try:
                 data, addr = sock.recvfrom(BUFFER_SIZE)
                 peer_info = json.loads(data.decode(ENCODING))
-                peer_ip = peer_info.get("ip") or addr[0]
-                if peer_ip == self.local_ip:
+                app_name = peer_info.get("app")
+                if app_name not in (None, "lan-code-share"):
                     continue
 
+                peer_ip = peer_info.get("ip") or addr[0]
+                if (not is_valid_ipv4(peer_ip)) or peer_ip.startswith("127."):
+                    peer_ip = addr[0]
+                if peer_ip == self.local_ip or peer_ip.startswith("127."):
+                    continue
+
+                try:
+                    peer_port = int(peer_info.get("port", TCP_PORT))
+                except Exception:
+                    peer_port = TCP_PORT
+                if peer_port < 1 or peer_port > 65535:
+                    peer_port = TCP_PORT
+
+                peer_name = peer_info.get("name") or f"\u8bbe\u5907 {peer_ip}"
+                refresh_needed = False
                 with self.peers_lock:
                     old_info = self.peers.get(peer_ip)
                     is_new = old_info is None
-                    name_changed = old_info and old_info.get("name") != peer_info.get("name")
+                    name_changed = bool(old_info and old_info.get("name") != peer_name)
+                    port_changed = bool(old_info and int(old_info.get("port", TCP_PORT) or TCP_PORT) != peer_port)
                     self.peers[peer_ip] = {
-                        "name": peer_info.get("name", f"设备 {peer_ip}"),
-                        "port": int(peer_info.get("port", TCP_PORT)),
+                        "name": peer_name,
+                        "port": peer_port,
                         "last_seen": time.time(),
                         "manual": False
                     }
+                    if not self.selected_peer_ip:
+                        self.selected_peer_ip = peer_ip
+                        refresh_needed = True
 
                 if is_new:
-                    self.add_log(f"发现新设备：{peer_info.get('name', peer_ip)} ({peer_ip})")
-                if is_new or name_changed:
+                    self.add_log(f"\u53d1\u73b0\u8bbe\u5907\uff1a{peer_name} ({peer_ip})")
+                if is_new or name_changed or port_changed or refresh_needed:
                     Clock.schedule_once(lambda dt: self._refresh_peer_list_ui(), 0)
             except socket.timeout:
                 continue
@@ -1248,7 +1361,6 @@ class RootWidget(BoxLayout):
                 continue
         sock.close()
 
-    # ---------- TCP服务端：接收代码 ----------
     def _tcp_server(self):
         """TCP服务端线程：监听并接收代码"""
         server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -1305,6 +1417,10 @@ class RootWidget(BoxLayout):
                 f.flush()
                 os.fsync(f.fileno())
             android_scan_file(save_path)
+            try:
+                sock.sendall(b"OK")
+            except Exception:
+                pass
             saved_name = os.path.basename(save_path)
             self.add_log(f"接收完成：{filename}，已保存为 {saved_name}")
 
@@ -1367,6 +1483,14 @@ class RootWidget(BoxLayout):
                 # 先发送数据长度，再发送实际内容
                 sock.sendall(len(payload).to_bytes(4, 'big'))
                 sock.sendall(payload)
+                try:
+                    sock.settimeout(3)
+                    ack = sock.recv(2)
+                except socket.timeout:
+                    ack = b""
+                if ack != b"OK":
+                    self.add_log("\u53d1\u9001\u5b8c\u6210\uff0c\u4f46\u672a\u6536\u5230\u5bf9\u65b9\u786e\u8ba4\uff1b\u8bf7\u67e5\u770b\u63a5\u6536\u65b9\u8bb0\u5f55")
+                    return
             self.add_log(f"发送成功：{filename}")
             Clock.schedule_once(
                 lambda dt: self._add_history("sent", filename, content, f"{peer_info['name']} ({target_ip})"),
@@ -1389,8 +1513,15 @@ class RootWidget(BoxLayout):
         self.ids.log_view.text = ""
 
     def on_stop(self):
-        """程序退出时停止所有线程"""
+        """Stop worker threads and release Android network locks."""
         self.running = False
+        lock = getattr(self, "multicast_lock", None)
+        if lock:
+            try:
+                if lock.isHeld():
+                    lock.release()
+            except Exception:
+                pass
 
 # ===================== 应用入口 =====================
 class CodeShareApp(App):
