@@ -266,6 +266,7 @@ KV_STRING = '''
             size_hint_x: None
             width: dp(70)
         Button:
+            id: pair_button
             text: "配对码"
             size_hint_x: None
             width: dp(70)
@@ -274,6 +275,7 @@ KV_STRING = '''
             color: 1, 1, 1, 1
             on_release: root.show_pair_qr()
         Button:
+            id: settings_button
             text: "设置"
             size_hint_x: None
             width: dp(60)
@@ -560,8 +562,9 @@ KV_STRING = '''
                 id: recv_view
                 text: ""
                 readonly: True
-                use_bubble: False
-                use_handles: False
+                focus: False
+                disabled: True
+                disabled_foreground_color: 0.9, 0.95, 1, 1
                 font_size: sp(12)
                 background_color: 0.05, 0.07, 0.10, 1
                 foreground_color: 0.9, 0.95, 1, 1
@@ -586,6 +589,7 @@ KV_STRING = '''
 
     # 底部状态日志
     BoxLayout:
+        id: log_panel
         size_hint_y: 0.20
         orientation: "vertical"
         padding: dp(6)
@@ -624,8 +628,9 @@ KV_STRING = '''
         TextInput:
             id: log_view
             readonly: True
-            use_bubble: False
-            use_handles: False
+            focus: False
+            disabled: True
+            disabled_foreground_color: 0.65, 0.78, 0.85, 1
             font_size: sp(10)
             background_color: 0.04, 0.05, 0.08, 1
             foreground_color: 0.65, 0.78, 0.85, 1
@@ -815,11 +820,11 @@ class RootWidget(BoxLayout):
     def _refresh_header_labels(self):
         """Keep the header readable on both desktop and phone widths."""
         if getattr(self, "layout_mode", None) == "mobile":
-            self.ids.title_label.text = "????"
-            self.ids.user_label.text = f"???\n{self.username}"
+            self.ids.title_label.text = "\u4ee3\u7801\u5206\u4eab"
+            self.ids.user_label.text = f"\u8bbe\u5907\u540d\n{self.username}"
         else:
-            self.ids.title_label.text = "???????"
-            self.ids.user_label.text = f"???{self.username}"
+            self.ids.title_label.text = "\u5c40\u57df\u7f51\u4ee3\u7801\u5206\u4eab"
+            self.ids.user_label.text = f"\u7528\u6237\uff1a{self.username}"
 
     def _update_responsive_layout(self, width):
         """Switch between desktop columns and a phone-friendly stacked layout."""
