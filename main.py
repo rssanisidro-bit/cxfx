@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
+import os
+os.environ.setdefault("KIVY_NO_ARGS", "1")
+
 import socket
 import threading
 import json
 import time
-import os
 import re
-from pathlib import Path
 from kivy.app import App
 from kivy.uix.boxlayout import BoxLayout
 from kivy.lang import Builder
@@ -23,8 +24,6 @@ from kivy.uix.image import Image
 from kivy.core.text import LabelBase
 from kivy.core.window import Window
 from kivy.utils import escape_markup, platform
-
-os.environ.setdefault("KIVY_NO_ARGS", "1")
 
 import qrcode
 from pygments import lex
@@ -64,6 +63,8 @@ TOKEN_COLORS = {
 def register_chinese_font():
     """优先加载同目录CJK字体，失败则尝试系统字体，保证中文正常显示"""
     font_paths = [
+        "assets/CJK.ttf",
+        "assets/CJK.ttc",
         "CJK.ttf",
         "CJK.ttc",
         "C:/Windows/Fonts/msyh.ttc",  # Windows 微软雅黑
@@ -82,6 +83,98 @@ def register_chinese_font():
 register_chinese_font()
 
 # ===================== 界面KV定义 =====================
+
+# Android compatibility helpers
+def request_android_permissions():
+    if platform != "android":
+        return
+    try:
+        from android.permissions import Permission, request_permissions
+        names = [
+            "INTERNET", "ACCESS_NETWORK_STATE", "ACCESS_WIFI_STATE",
+            "CHANGE_WIFI_MULTICAST_STATE", "READ_EXTERNAL_STORAGE",
+            "WRITE_EXTERNAL_STORAGE", "READ_MEDIA_IMAGES", "READ_MEDIA_VIDEO",
+            "READ_MEDIA_AUDIO",
+        ]
+        permissions = [getattr(Permission, name) for name in names if hasattr(Permission, name)]
+        request_permissions(permissions)
+    except Exception:
+        pass
+
+
+def writable_directory(path):
+    try:
+        os.makedirs(path, exist_ok=True)
+        probe = os.path.join(path, ".write_test")
+        with open(probe, "w", encoding="utf-8") as f:
+            f.write("ok")
+        try:
+            os.remove(probe)
+        except OSError:
+            pass
+        return True
+    except Exception:
+        return False
+
+
+def app_private_dir():
+    app = App.get_running_app()
+    if app and app.user_data_dir:
+        return app.user_data_dir
+    return os.getcwd()
+
+
+def default_save_dir():
+    if platform == "android":
+        candidates = []
+        try:
+            from android.storage import primary_external_storage_path, app_storage_path
+            root = primary_external_storage_path()
+            candidates.append(os.path.join(root, "Download", "LanCodeShare"))
+            candidates.append(os.path.join(root, "Documents", "LanCodeShare"))
+            candidates.append(os.path.join(app_storage_path(), "received_codes"))
+        except Exception:
+            pass
+        candidates.append(os.path.join(app_private_dir(), "received_codes"))
+        for candidate in candidates:
+            if candidate and writable_directory(candidate):
+                return candidate
+    path = os.path.join(os.getcwd(), "received_codes")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def android_scan_file(path):
+    if platform != "android":
+        return False
+    try:
+        from jnius import autoclass
+        PythonActivity = autoclass("org.kivy.android.PythonActivity")
+        MediaScannerConnection = autoclass("android.media.MediaScannerConnection")
+        MediaScannerConnection.scanFile(PythonActivity.mActivity, [str(path)], None, None)
+        return True
+    except Exception:
+        return False
+
+
+def get_android_wifi_ip():
+    if platform != "android":
+        return None
+    try:
+        from jnius import autoclass
+        PythonActivity = autoclass("org.kivy.android.PythonActivity")
+        Context = autoclass("android.content.Context")
+        Formatter = autoclass("android.text.format.Formatter")
+        activity = PythonActivity.mActivity
+        wifi = activity.getApplicationContext().getSystemService(Context.WIFI_SERVICE)
+        if wifi:
+            ip = Formatter.formatIpAddress(wifi.getConnectionInfo().getIpAddress())
+            if ip and not ip.startswith("127.") and ip != "0.0.0.0":
+                return str(ip)
+    except Exception:
+        return None
+    return None
+
 KV_STRING = '''
 #:import dp kivy.metrics.dp
 #:import sp kivy.metrics.sp
@@ -519,6 +612,9 @@ KV_STRING = '''
 # ===================== 工具函数 =====================
 def get_local_ip():
     """获取本机局域网IP地址"""
+    android_ip = get_android_wifi_ip()
+    if android_ip:
+        return android_ip
     try:
         test_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         test_socket.connect(("8.8.8.8", 80))
@@ -875,7 +971,7 @@ class RootWidget(BoxLayout):
 
     # ---------- 文件选择功能 ----------
     def open_file_chooser(self):
-        """????????????????Android ?? SAF??? content:// ???????"""
+        """Open a code file. On Android, use SAF so content:// files can be read safely."""
         if platform == "android" and self._open_android_file_picker():
             return
 
@@ -888,7 +984,7 @@ class RootWidget(BoxLayout):
                     content = f.read()
                 self._apply_loaded_file(os.path.basename(file_path), content)
             except Exception as e:
-                self.add_log(f"???????{e}")
+                self.add_log(f"File read failed: {e}")
 
         if plyer_filechooser:
             plyer_filechooser.open_file(
@@ -900,12 +996,12 @@ class RootWidget(BoxLayout):
 
     def _apply_loaded_file(self, filename, content):
         if len(content.encode(ENCODING)) > MAX_PAYLOAD_BYTES:
-            self.add_log("????10MB????????")
+            self.add_log("File is larger than 10MB")
             return
         filename = sanitize_filename(filename)
         self.ids.code_input.text = content
         self.ids.filename_input.text = filename
-        self.add_log(f"??????{filename}")
+        self.add_log(f"Loaded file: {filename}")
 
     def _open_android_file_picker(self):
         try:
@@ -922,10 +1018,10 @@ class RootWidget(BoxLayout):
                 NativeTextBridge.createOpenDocumentIntent(),
                 ANDROID_FILE_PICK_REQUEST,
             )
-            self.add_log("??????????")
+            self.add_log("File operation canceled")
             return True
         except Exception as exc:
-            self.add_log(f"???????????????????{exc}")
+            self.add_log(f"File operation failed: {exc}")
             return False
 
     def on_android_file_result(self, request_code, result_code, intent):
@@ -940,7 +1036,7 @@ class RootWidget(BoxLayout):
                 pass
             Activity = autoclass("android.app.Activity")
             if result_code != Activity.RESULT_OK or intent is None:
-                self.add_log("???????")
+                self.add_log("File operation canceled")
                 return
             NativeTextBridge = autoclass("org.tju.challenge.lancodeshare.NativeTextBridge")
             PythonActivity = autoclass("org.kivy.android.PythonActivity")
@@ -948,7 +1044,7 @@ class RootWidget(BoxLayout):
             filename = str(NativeTextBridge.getDisplayNameForUri(PythonActivity.mActivity, uri))
             threading.Thread(target=self._load_android_uri_thread, args=(uri, filename), daemon=True).start()
         except Exception as exc:
-            self.add_log(f"???????{exc}")
+            self.add_log(f"File operation failed: {exc}")
 
     def _load_android_uri_thread(self, uri, filename):
         try:
@@ -958,7 +1054,7 @@ class RootWidget(BoxLayout):
             content = str(NativeTextBridge.readUriAsText(PythonActivity.mActivity, uri, ENCODING, MAX_PAYLOAD_BYTES))
             Clock.schedule_once(lambda dt: self._apply_loaded_file(filename, content), 0)
         except Exception as exc:
-            self.add_log(f"???????{exc}")
+            self.add_log(f"File operation failed: {exc}")
 
     def _open_kivy_file_chooser(self, on_selection):
         """plyer不可用时使用Kivy内置文件选择器"""
@@ -1299,8 +1395,10 @@ class RootWidget(BoxLayout):
 # ===================== 应用入口 =====================
 class CodeShareApp(App):
     def build(self):
+        request_android_permissions()
         Builder.load_string(KV_STRING)
         self.title = "局域网代码分享"
+        self.icon = "assets/icon.png"
         return RootWidget()
 
     def on_stop(self):
