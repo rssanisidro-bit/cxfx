@@ -47,3 +47,4 @@ jobs:
           name: LanCodeShare-debug-apk
           path: bin/*.apk
           if-no-files-found: error
+
