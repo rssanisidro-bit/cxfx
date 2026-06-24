@@ -560,6 +560,8 @@ KV_STRING = '''
                 id: recv_view
                 text: ""
                 readonly: True
+                use_bubble: False
+                use_handles: False
                 font_size: sp(12)
                 background_color: 0.05, 0.07, 0.10, 1
                 foreground_color: 0.9, 0.95, 1, 1
@@ -622,6 +624,8 @@ KV_STRING = '''
         TextInput:
             id: log_view
             readonly: True
+            use_bubble: False
+            use_handles: False
             font_size: sp(10)
             background_color: 0.04, 0.05, 0.08, 1
             foreground_color: 0.65, 0.78, 0.85, 1
@@ -808,8 +812,17 @@ class RootWidget(BoxLayout):
         """更新输入框字符计数"""
         self.ids.char_count.text = f"{len(self.ids.code_input.text)} 字符"
 
+    def _refresh_header_labels(self):
+        """Keep the header readable on both desktop and phone widths."""
+        if getattr(self, "layout_mode", None) == "mobile":
+            self.ids.title_label.text = "????"
+            self.ids.user_label.text = f"???\n{self.username}"
+        else:
+            self.ids.title_label.text = "???????"
+            self.ids.user_label.text = f"???{self.username}"
+
     def _update_responsive_layout(self, width):
-        """根据窗口宽度在桌面三栏和手机上下布局之间切换"""
+        """Switch between desktop columns and a phone-friendly stacked layout."""
         mode = "mobile" if width < dp(720) else "desktop"
         if mode == self.layout_mode:
             return
@@ -819,23 +832,57 @@ class RootWidget(BoxLayout):
         send_panel = self.ids.send_panel
         peer_panel = self.ids.peer_panel
         receive_panel = self.ids.receive_panel
+        top_bar = self.ids.top_bar
+        log_panel = self.ids.log_panel
 
         if mode == "mobile":
             main_area.orientation = "vertical"
-            send_panel.size_hint = (1, 0.50)
-            peer_panel.size_hint = (1, 0.22)
-            receive_panel.size_hint = (1, 0.28)
-            self.ids.title_label.font_size = sp(14)
-            self.ids.user_label.width = dp(88)
-            self.ids.status_label.width = dp(56)
+            main_area.spacing = dp(8)
+            top_bar.height = dp(58)
+            top_bar.padding = [dp(8), 0]
+            top_bar.spacing = dp(5)
+            send_panel.size_hint = (1, 0.40)
+            peer_panel.size_hint = (1, 0.31)
+            receive_panel.size_hint = (1, 0.29)
+            log_panel.size_hint_y = 0.14
+            self.ids.title_label.size_hint_x = None
+            self.ids.title_label.font_size = sp(15)
+            self.ids.title_label.width = dp(82)
+            self.ids.user_label.width = dp(86)
+            self.ids.user_label.font_size = sp(10)
+            self.ids.status_label.width = dp(46)
+            self.ids.status_label.font_size = sp(10)
+            self.ids.pair_button.width = dp(52)
+            self.ids.pair_button.font_size = sp(10)
+            self.ids.settings_button.width = dp(46)
+            self.ids.settings_button.font_size = sp(10)
+            send_panel.padding = [dp(10), dp(10), dp(10), dp(10)]
+            peer_panel.padding = [dp(10), dp(10), dp(10), dp(10)]
+            receive_panel.padding = [dp(10), dp(10), dp(10), dp(10)]
         else:
             main_area.orientation = "horizontal"
+            main_area.spacing = dp(8)
+            top_bar.height = dp(50)
+            top_bar.padding = [dp(10), 0]
+            top_bar.spacing = dp(8)
             send_panel.size_hint = (0.45, 1)
             peer_panel.size_hint = (0.25, 1)
             receive_panel.size_hint = (0.30, 1)
+            log_panel.size_hint_y = 0.20
+            self.ids.title_label.size_hint_x = 1
             self.ids.title_label.font_size = sp(18)
             self.ids.user_label.width = dp(125)
+            self.ids.user_label.font_size = sp(12)
             self.ids.status_label.width = dp(70)
+            self.ids.status_label.font_size = sp(12)
+            self.ids.pair_button.width = dp(70)
+            self.ids.pair_button.font_size = sp(11)
+            self.ids.settings_button.width = dp(60)
+            self.ids.settings_button.font_size = sp(11)
+            send_panel.padding = [dp(8), dp(8), dp(8), dp(8)]
+            peer_panel.padding = [dp(8), dp(8), dp(8), dp(8)]
+            receive_panel.padding = [dp(8), dp(8), dp(8), dp(8)]
+        self._refresh_header_labels()
 
     def _add_history(self, direction, filename, content, peer):
         """记录最近发送/接收的代码"""
@@ -1176,7 +1223,7 @@ class RootWidget(BoxLayout):
 
     @mainthread
     def _refresh_peer_list_ui(self):
-        """Refresh peer list using simple Buttons for Android stability."""
+        """Refresh peer list using clear device cards for Android stability."""
         peer_list = self.ids.peer_list_box
         peer_list.clear_widgets()
         with self.peers_lock:
@@ -1197,34 +1244,36 @@ class RootWidget(BoxLayout):
 
         if not peers_snapshot:
             empty_label = Label(
-                text="\u6682\u65e0\u5728\u7ebf\u6210\u5458",
-                color=(0.5, 0.55, 0.65, 1),
+                text="\u6682\u65e0\u5728\u7ebf\u6210\u5458\n\u53ef\u7b49\u5f85\u81ea\u52a8\u53d1\u73b0\uff0c\u6216\u4f7f\u7528 IP \u76f4\u8fde",
+                color=(0.55, 0.62, 0.72, 1),
                 font_size=sp(11),
                 size_hint_y=None,
-                height=dp(28),
+                height=dp(52),
                 halign="center",
                 valign="middle"
             )
+            empty_label.bind(size=lambda widget, size: setattr(widget, "text_size", size))
             peer_list.add_widget(empty_label)
         else:
             for ip, info in peers_snapshot:
                 name = info.get("name", f"\u8bbe\u5907 {ip}")
                 port = int(info.get("port", TCP_PORT) or TCP_PORT)
                 address = f"{ip}:{port}" if port != TCP_PORT else ip
-                display_name = f"{name}\n{address}"
+                tag = "\u624b\u52a8" if info.get("manual") else "\u5728\u7ebf"
+                display_name = f"{name} \u00b7 {tag}\n{address}"
                 selected = ip == self.selected_peer_ip
                 btn = Button(
                     text=display_name,
                     size_hint_y=None,
-                    height=dp(46),
+                    height=dp(54),
                     background_normal="",
-                    background_color=(0.31, 0.55, 1, 1) if selected else (0.15, 0.20, 0.30, 1),
-                    color=(1, 1, 1, 1) if selected else (0.88, 0.94, 1, 1),
+                    background_color=(0.24, 0.46, 0.88, 1) if selected else (0.12, 0.17, 0.25, 1),
+                    color=(1, 1, 1, 1) if selected else (0.86, 0.92, 1, 1),
                     font_size=sp(11),
-                    halign="center",
+                    halign="left",
                     valign="middle"
                 )
-                btn.text_size = (dp(170), None)
+                btn.bind(size=lambda widget, size: setattr(widget, "text_size", (size[0] - dp(16), None)))
                 btn.bind(on_release=lambda _btn, ip=ip, name=name: self._select_peer(ip, name))
                 peer_list.add_widget(btn)
 
