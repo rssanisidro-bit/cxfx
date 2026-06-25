@@ -47,7 +47,7 @@ ENCODING = "utf-8"
 MAX_PAYLOAD_BYTES = 10 * 1024 * 1024  # 单次分享最大10MB，避免误传超大内容
 MAX_HISTORY_ITEMS = 50
 QR_FILENAME = "pair_qr.png"
-APP_VERSION = "v20260625-textfix2"
+APP_VERSION = "v20260625-ipv6-ui"
 ANDROID_FILE_PICK_REQUEST = 18890
 TOKEN_COLORS = {
     Keyword: "8cc8ff",
@@ -122,8 +122,12 @@ def writable_directory(path):
 
 def app_private_dir():
     app = App.get_running_app()
-    if app and app.user_data_dir:
-        return app.user_data_dir
+    if app:
+        try:
+            if app.user_data_dir:
+                return app.user_data_dir
+        except Exception:
+            pass
     return os.getcwd()
 
 
@@ -205,10 +209,88 @@ def get_android_interface_ips():
     return ips
 
 
+def _strip_ipv6_scope(ip):
+    return (ip or "").split("%", 1)[0]
+
+
+def is_valid_ipv6(ip):
+    """Return True when ip is a valid IPv6 literal, including scoped link-local input."""
+    try:
+        socket.inet_pton(socket.AF_INET6, _strip_ipv6_scope(ip))
+        return True
+    except OSError:
+        return False
+
+
+def is_loopback_ip(ip):
+    clean = _strip_ipv6_scope(ip)
+    return clean.startswith("127.") or clean in ("::1", "0:0:0:0:0:0:0:1")
+
+
+def normalize_ipv6_host(host):
+    value = (host or "").strip()
+    if value.startswith("[") and "]" in value:
+        value = value[1:value.index("]")]
+    return value
+
+
+def get_android_interface_ipv6s():
+    """Return usable IPv6 addresses from Android network interfaces."""
+    if platform != "android":
+        return []
+    ips = []
+    try:
+        from jnius import autoclass
+        NetworkInterface = autoclass("java.net.NetworkInterface")
+        Collections = autoclass("java.util.Collections")
+        interfaces = Collections.list(NetworkInterface.getNetworkInterfaces())
+        for iface in interfaces:
+            try:
+                if not iface.isUp() or iface.isLoopback():
+                    continue
+                iface_name = str(iface.getName())
+                addresses = Collections.list(iface.getInetAddresses())
+                for addr in addresses:
+                    host = str(addr.getHostAddress())
+                    if not host or ":" not in host:
+                        continue
+                    base = _strip_ipv6_scope(host)
+                    if not is_valid_ipv6(base) or is_loopback_ip(base):
+                        continue
+                    if host.startswith("fe80:") and "%" not in host and iface_name:
+                        host = f"{base}%{iface_name}"
+                    if host not in ips:
+                        ips.append(host)
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return ips
+
+
+def get_local_ipv6_candidates():
+    """Collect local IPv6 candidates for display, discovery and self-address checks."""
+    ips = []
+    for ip in get_android_interface_ipv6s():
+        if ip not in ips:
+            ips.append(ip)
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET6):
+            ip = info[4][0]
+            if ip and is_valid_ipv6(ip) and not is_loopback_ip(ip) and ip not in ips:
+                ips.append(ip)
+    except Exception:
+        pass
+    return ips
+
+
 def get_local_ip_candidates():
-    """Collect local IPv4 candidates for self-address detection."""
+    """Collect local IP candidates for self-address detection."""
     ips = []
     for ip in get_android_interface_ips():
+        if ip not in ips:
+            ips.append(ip)
+    for ip in get_local_ipv6_candidates():
         if ip not in ips:
             ips.append(ip)
     try:
@@ -268,9 +350,13 @@ KV_STRING = '''
 
 <Button>:
     font_name: "CJK"
+    background_normal: ""
+    background_down: ""
 
 <ToggleButton>:
     font_name: "CJK"
+    background_normal: ""
+    background_down: ""
 
 <TextInput>:
     font_name: "CJK"
@@ -284,7 +370,7 @@ KV_STRING = '''
     spacing: dp(8)
     canvas.before:
         Color:
-            rgba: 0.07, 0.09, 0.13, 1
+            rgba: 0.055, 0.075, 0.115, 1
         Rectangle:
             pos: self.pos
             size: self.size
@@ -298,7 +384,7 @@ KV_STRING = '''
         spacing: dp(8)
         canvas.before:
             Color:
-                rgba: 0.13, 0.17, 0.24, 1
+                rgba: 0.09, 0.16, 0.27, 1
             RoundedRectangle:
                 pos: self.pos
                 size: self.size
@@ -339,7 +425,7 @@ KV_STRING = '''
             size_hint_x: None
             width: dp(70)
             font_size: sp(11)
-            background_color: 0.20, 0.24, 0.32, 1
+            background_color: 0.12, 0.16, 0.24, 1
             color: 1, 1, 1, 1
             on_release: root.show_pair_qr()
         Button:
@@ -347,7 +433,7 @@ KV_STRING = '''
             text: "设置"
             size_hint_x: None
             width: dp(60)
-            background_color: 0.20, 0.24, 0.32, 1
+            background_color: 0.12, 0.16, 0.24, 1
             color: 1, 1, 1, 1
             on_release: root.open_settings()
 
@@ -379,7 +465,7 @@ KV_STRING = '''
             size_hint_x: 0.45
             canvas.before:
                 Color:
-                    rgba: 0.11, 0.14, 0.20, 1
+                    rgba: 0.085, 0.115, 0.18, 1
                 RoundedRectangle:
                     pos: self.pos
                     size: self.size
@@ -449,22 +535,22 @@ KV_STRING = '''
                 spacing: dp(6)
                 Button:
                     text: "打开文件"
-                    background_color: 0.20, 0.24, 0.32, 1
+                    background_color: 0.12, 0.16, 0.24, 1
                     color: 1, 1, 1, 1
                     on_release: root.open_file_chooser()
                 Button:
                     text: "粘贴"
-                    background_color: 0.20, 0.24, 0.32, 1
+                    background_color: 0.12, 0.16, 0.24, 1
                     color: 1, 1, 1, 1
                     on_release: root.paste_from_clipboard()
                 Button:
                     text: "预览"
-                    background_color: 0.20, 0.24, 0.32, 1
+                    background_color: 0.12, 0.16, 0.24, 1
                     color: 1, 1, 1, 1
                     on_release: root.preview_send_code()
                 Button:
                     text: "发送"
-                    background_color: 0.31, 0.55, 1, 1
+                    background_color: 0.10, 0.48, 0.96, 1
                     color: 1, 1, 1, 1
                     bold: True
                     on_release: root.send_code()
@@ -478,7 +564,7 @@ KV_STRING = '''
             size_hint_x: 0.25
             canvas.before:
                 Color:
-                    rgba: 0.11, 0.14, 0.20, 1
+                    rgba: 0.085, 0.115, 0.18, 1
                 RoundedRectangle:
                     pos: self.pos
                     size: self.size
@@ -529,7 +615,7 @@ KV_STRING = '''
                 spacing: dp(6)
                 TextInput:
                     id: manual_ip_input
-                    hint_text: "IP 或 IP:端口"
+                    hint_text: "IP / [IPv6]:端口"
                     multiline: False
                     font_size: sp(11)
                     background_color: 0.05, 0.07, 0.10, 1
@@ -541,7 +627,7 @@ KV_STRING = '''
                     size_hint_x: None
                     width: dp(56)
                     font_size: sp(11)
-                    background_color: 0.20, 0.24, 0.32, 1
+                    background_color: 0.12, 0.16, 0.24, 1
                     color: 1, 1, 1, 1
                     on_release: root.add_manual_peer()
 
@@ -566,7 +652,7 @@ KV_STRING = '''
             size_hint_x: 0.30
             canvas.before:
                 Color:
-                    rgba: 0.11, 0.14, 0.20, 1
+                    rgba: 0.085, 0.115, 0.18, 1
                 RoundedRectangle:
                     pos: self.pos
                     size: self.size
@@ -593,7 +679,7 @@ KV_STRING = '''
                     size_hint_x: None
                     width: dp(56)
                     font_size: sp(11)
-                    background_color: 0.20, 0.24, 0.32, 1
+                    background_color: 0.12, 0.16, 0.24, 1
                     color: 1, 1, 1, 1
                     on_release: root.show_history()
                 Button:
@@ -601,7 +687,7 @@ KV_STRING = '''
                     size_hint_x: None
                     width: dp(56)
                     font_size: sp(11)
-                    background_color: 0.20, 0.24, 0.32, 1
+                    background_color: 0.12, 0.16, 0.24, 1
                     color: 1, 1, 1, 1
                     on_release: root.clear_received()
 
@@ -639,7 +725,7 @@ KV_STRING = '''
                 text: "复制到剪贴板"
                 size_hint_y: None
                 height: dp(36)
-                background_color: 0.31, 0.55, 1, 1
+                background_color: 0.10, 0.48, 0.96, 1
                 color: 1, 1, 1, 1
                 bold: True
                 on_release: root.copy_to_clipboard()
@@ -648,7 +734,7 @@ KV_STRING = '''
                 text: "高亮预览"
                 size_hint_y: None
                 height: dp(34)
-                background_color: 0.20, 0.24, 0.32, 1
+                background_color: 0.12, 0.16, 0.24, 1
                 color: 1, 1, 1, 1
                 on_release: root.preview_received_code()
 
@@ -661,7 +747,7 @@ KV_STRING = '''
         spacing: dp(4)
         canvas.before:
             Color:
-                rgba: 0.09, 0.11, 0.16, 1
+                rgba: 0.075, 0.10, 0.155, 1
             RoundedRectangle:
                 pos: self.pos
                 size: self.size
@@ -687,7 +773,7 @@ KV_STRING = '''
                 size_hint_x: None
                 width: dp(56)
                 font_size: sp(10)
-                background_color: 0.18, 0.22, 0.30, 1
+                background_color: 0.12, 0.16, 0.24, 1
                 color: 1, 1, 1, 1
                 on_release: root.clear_log()
         ReadOnlyTextInput:
@@ -741,27 +827,91 @@ def is_valid_ipv4(ip):
     except OSError:
         return False
 
+
+def is_valid_host_ip(ip):
+    return is_valid_ipv4(ip) or is_valid_ipv6(ip)
+
+
+def format_peer_address(ip, port=TCP_PORT):
+    if is_valid_ipv6(ip):
+        wrapped = f"[{ip}]"
+        return f"{wrapped}:{port}" if int(port or TCP_PORT) != TCP_PORT else wrapped
+    return f"{ip}:{port}" if int(port or TCP_PORT) != TCP_PORT else ip
+
+
 def parse_peer_address(raw):
-    """Parse manual peer input as IPv4 or IPv4:port. Returns (ip, port) or None."""
+    """Parse manual peer input as IPv4/IPv6 with optional port. Returns (ip, port) or None."""
     value = (raw or "").strip().replace(" ", "").replace("\uff1a", ":")
     value = re.sub(r"^https?://", "", value, flags=re.IGNORECASE)
-    value = value.split("/", 1)[0]
+    if value.startswith("["):
+        end = value.find("]")
+        if end <= 0:
+            return None
+        host = value[1:end]
+        rest = value[end + 1:]
+        value = host
+        port_text = None
+        if rest.startswith(":"):
+            port_text = rest[1:].split("/", 1)[0]
+        elif rest.startswith("/"):
+            port_text = None
+        elif rest:
+            return None
+    else:
+        value = value.split("/", 1)[0]
+        port_text = None
     if not value:
         return None
 
     port = TCP_PORT
     ip = value
-    if ":" in value:
+    if port_text is not None:
+        if not port_text.isdigit():
+            return None
+        port = int(port_text)
+        if port < 1 or port > 65535:
+            return None
+    elif value.count(":") == 1:
         ip, port_text = value.rsplit(":", 1)
         if not port_text.isdigit():
             return None
         port = int(port_text)
         if port < 1 or port > 65535:
             return None
+    elif value.count(":") > 1 and not is_valid_ipv6(value):
+        ip_part, maybe_port = value.rsplit(":", 1)
+        if maybe_port.isdigit() and is_valid_ipv6(ip_part):
+            ip = ip_part
+            port = int(maybe_port)
+            if port < 1 or port > 65535:
+                return None
 
-    if not is_valid_ipv4(ip):
+    ip = normalize_ipv6_host(ip)
+    if not is_valid_host_ip(ip):
         return None
     return ip, port
+
+
+def connect_tcp(host, port, timeout=8):
+    """Open a TCP connection to an IPv4 or IPv6 literal."""
+    family = socket.AF_INET6 if is_valid_ipv6(host) else socket.AF_INET
+    last_error = None
+    try:
+        addr_infos = socket.getaddrinfo(host, port, family, socket.SOCK_STREAM)
+    except Exception:
+        addr_infos = [(family, socket.SOCK_STREAM, 0, "", (host, port, 0, 0) if family == socket.AF_INET6 else (host, port))]
+    for af, socktype, proto, _canon, sockaddr in addr_infos:
+        sock = socket.socket(af, socktype, proto)
+        try:
+            sock.settimeout(timeout)
+            sock.connect(sockaddr)
+            return sock
+        except OSError as exc:
+            last_error = exc
+            sock.close()
+    if last_error:
+        raise last_error
+    raise OSError("connect failed")
 
 
 def get_broadcast_targets(ip):
@@ -840,6 +990,7 @@ class RootWidget(BoxLayout):
         super().__init__(**kwargs)
         self.username = f"\u8bbe\u5907_{os.getpid()}"
         self.local_ip = "127.0.0.1"
+        self.local_ipv6 = []
         self.save_dir = app_private_dir()
         self.multicast_lock = None
         self.network_started = False
@@ -851,11 +1002,15 @@ class RootWidget(BoxLayout):
         self.layout_mode = None
         self.history = []
 
-        self.ids.save_dir_label.text = f"{APP_VERSION}    \u672c\u673aIP\uff1a\u83b7\u53d6\u4e2d    \u4fdd\u5b58\u5230\uff1a{self.save_dir}"
+        self.ids.save_dir_label.text = self._save_status_text()
         self.update_char_count()
         self._update_responsive_layout(Window.width)
         Window.bind(size=lambda window, size: self._update_responsive_layout(size[0]))
         Clock.schedule_once(self._post_startup, 0.2)
+
+    def _save_status_text(self):
+        ipv6_count = len(getattr(self, "local_ipv6", []) or [])
+        return f"{APP_VERSION}  \u672c\u673aIPv4\uff1a{self.local_ip}  IPv6\uff1a{ipv6_count}\u4e2a  \u4fdd\u5b58\u5230\uff1a{self.save_dir}"
 
     def _post_startup(self, dt):
         try:
@@ -865,13 +1020,14 @@ class RootWidget(BoxLayout):
 
         try:
             self.local_ip = get_local_ip()
+            self.local_ipv6 = get_local_ipv6_candidates()
         except Exception as e:
             self.local_ip = "127.0.0.1"
             self.add_log(f"获取本机IP失败：{e}")
 
         try:
             self.save_dir = default_save_dir()
-            self.ids.save_dir_label.text = f"{APP_VERSION}    \u672c\u673aIP\uff1a{self.local_ip}    \u4fdd\u5b58\u5230\uff1a{self.save_dir}"
+            self.ids.save_dir_label.text = self._save_status_text()
         except Exception as e:
             self.add_log(f"保存目录初始化失败：{e}")
 
@@ -882,7 +1038,7 @@ class RootWidget(BoxLayout):
 
         if not self.network_started:
             self.network_started = True
-            for target in (self._udp_broadcast_sender, self._udp_broadcast_receiver, self._tcp_server):
+            for target in (self._udp_broadcast_sender, self._udp_broadcast_receiver, self._tcp_server, self._tcp_server_ipv6):
                 try:
                     threading.Thread(target=target, daemon=True).start()
                 except Exception as e:
@@ -915,10 +1071,10 @@ class RootWidget(BoxLayout):
     def _refresh_header_labels(self):
         """Keep the header readable on both desktop and phone widths."""
         if getattr(self, "layout_mode", None) == "mobile":
-            self.ids.title_label.text = f"\u4ee3\u7801\u5206\u4eab {APP_VERSION}"
-            self.ids.user_label.text = f"\u8bbe\u5907\u540d\n{self.username}"
+            self.ids.title_label.text = "\u7a0b\u5e8f\u5206\u4eab"
+            self.ids.user_label.text = f"\u8bbe\u5907\n{self.username}"
         else:
-            self.ids.title_label.text = f"\u5c40\u57df\u7f51\u4ee3\u7801\u5206\u4eab {APP_VERSION}"
+            self.ids.title_label.text = f"\u5c40\u57df\u7f51\u7a0b\u5e8f\u5206\u4eab {APP_VERSION}"
             self.ids.user_label.text = f"\u7528\u6237\uff1a{self.username}"
 
     def _update_responsive_layout(self, width):
@@ -937,28 +1093,30 @@ class RootWidget(BoxLayout):
 
         if mode == "mobile":
             main_area.orientation = "vertical"
-            main_area.spacing = dp(8)
-            top_bar.height = dp(58)
-            top_bar.padding = [dp(8), 0]
-            top_bar.spacing = dp(5)
-            send_panel.size_hint = (1, 0.40)
-            peer_panel.size_hint = (1, 0.31)
-            receive_panel.size_hint = (1, 0.29)
-            log_panel.size_hint_y = 0.14
+            main_area.spacing = dp(10)
+            top_bar.height = dp(64)
+            top_bar.padding = [dp(12), 0]
+            top_bar.spacing = dp(6)
+            send_panel.size_hint = (1, 0.37)
+            peer_panel.size_hint = (1, 0.32)
+            receive_panel.size_hint = (1, 0.31)
+            log_panel.size_hint_y = 0.13
             self.ids.title_label.size_hint_x = None
-            self.ids.title_label.font_size = sp(15)
-            self.ids.title_label.width = dp(82)
-            self.ids.user_label.width = dp(86)
+            self.ids.title_label.font_size = sp(17)
+            self.ids.title_label.width = dp(96)
+            self.ids.user_label.width = dp(94)
             self.ids.user_label.font_size = sp(10)
-            self.ids.status_label.width = dp(46)
+            self.ids.status_label.width = dp(54)
             self.ids.status_label.font_size = sp(10)
-            self.ids.pair_button.width = dp(52)
+            self.ids.pair_button.width = dp(58)
             self.ids.pair_button.font_size = sp(10)
-            self.ids.settings_button.width = dp(46)
+            self.ids.settings_button.width = dp(54)
             self.ids.settings_button.font_size = sp(10)
-            send_panel.padding = [dp(10), dp(10), dp(10), dp(10)]
-            peer_panel.padding = [dp(10), dp(10), dp(10), dp(10)]
-            receive_panel.padding = [dp(10), dp(10), dp(10), dp(10)]
+            send_panel.padding = [dp(12), dp(12), dp(12), dp(12)]
+            peer_panel.padding = [dp(12), dp(12), dp(12), dp(12)]
+            receive_panel.padding = [dp(12), dp(12), dp(12), dp(12)]
+            self.ids.save_dir_label.height = dp(34)
+            self.ids.save_dir_label.font_size = sp(10)
         else:
             main_area.orientation = "horizontal"
             main_area.spacing = dp(8)
@@ -982,6 +1140,8 @@ class RootWidget(BoxLayout):
             send_panel.padding = [dp(8), dp(8), dp(8), dp(8)]
             peer_panel.padding = [dp(8), dp(8), dp(8), dp(8)]
             receive_panel.padding = [dp(8), dp(8), dp(8), dp(8)]
+            self.ids.save_dir_label.height = dp(26)
+            self.ids.save_dir_label.font_size = sp(11)
         self._refresh_header_labels()
 
     def _add_history(self, direction, filename, content, peer):
@@ -1040,8 +1200,10 @@ class RootWidget(BoxLayout):
         """显示本机配对二维码，扫码后可看到IP和端口"""
         pair_info = {
             "app": "lan-code-share",
+            "version": 3,
             "name": self.username,
             "ip": self.local_ip,
+            "ipv6": self.local_ipv6[:4],
             "port": TCP_PORT
         }
         pair_text = json.dumps(pair_info, ensure_ascii=False)
@@ -1052,7 +1214,7 @@ class RootWidget(BoxLayout):
         content = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(12))
         content.add_widget(Image(source=qr_path, allow_stretch=True, keep_ratio=True))
         ip_label = Label(
-            text=f"IP：{self.local_ip}    端口：{TCP_PORT}",
+            text=f"IP: {self.local_ip}    IPv6: {len(self.local_ipv6)}    Port: {TCP_PORT}",
             size_hint_y=None,
             height=dp(28),
             font_size=sp(13),
@@ -1358,16 +1520,17 @@ class RootWidget(BoxLayout):
             for ip, info in peers_snapshot:
                 name = info.get("name", f"\u8bbe\u5907 {ip}")
                 port = int(info.get("port", TCP_PORT) or TCP_PORT)
-                address = f"{ip}:{port}" if port != TCP_PORT else ip
+                address = format_peer_address(ip, port)
                 tag = "\u624b\u52a8" if info.get("manual") else "\u5728\u7ebf"
-                display_name = f"{name} \u00b7 {tag}\n{address}"
+                family = info.get("family") or ("IPv6" if is_valid_ipv6(ip) else "IPv4")
+                display_name = f"{name} \u00b7 {tag} \u00b7 {family}\n{address}"
                 selected = ip == self.selected_peer_ip
                 btn = Button(
                     text=display_name,
                     size_hint_y=None,
-                    height=dp(54),
+                    height=dp(60),
                     background_normal="",
-                    background_color=(0.24, 0.46, 0.88, 1) if selected else (0.12, 0.17, 0.25, 1),
+                    background_color=(0.10, 0.46, 0.92, 1) if selected else (0.10, 0.15, 0.23, 1),
                     color=(1, 1, 1, 1) if selected else (0.86, 0.92, 1, 1),
                     font_size=sp(11),
                     halign="left",
@@ -1377,7 +1540,10 @@ class RootWidget(BoxLayout):
                 btn.bind(on_release=lambda _btn, ip=ip, name=name: self._select_peer(ip, name))
                 peer_list.add_widget(btn)
 
-        self.ids.peer_count_label.text = f"\u5728\u7ebf {len(peers_snapshot)} \u4eba"
+        device_keys = set()
+        for ip, info in peers_snapshot:
+            device_keys.add(info.get("name") or ip)
+        self.ids.peer_count_label.text = f"\u5728\u7ebf {len(device_keys)} \u4eba"
 
     @mainthread
     def _select_peer(self, ip, name):
@@ -1385,41 +1551,74 @@ class RootWidget(BoxLayout):
         self.selected_peer_ip = ip
         self.ids.selected_peer_label.text = f"\u5df2\u9009\u62e9\uff1a{name}"
         self._refresh_peer_list_ui()
-        self.add_log(f"\u9009\u4e2d\u63a5\u6536\u65b9\uff1a{name} ({ip})")
+        with self.peers_lock:
+            port = int(self.peers.get(ip, {}).get("port", TCP_PORT) or TCP_PORT)
+        self.add_log(f"\u9009\u4e2d\u63a5\u6536\u65b9\uff1a{name} ({format_peer_address(ip, port)})")
+
+    def _remember_peer(self, ip, name, port=TCP_PORT, manual=False, family=None):
+        ip = normalize_ipv6_host(ip)
+        if not is_valid_host_ip(ip) or is_loopback_ip(ip):
+            return False, False
+        try:
+            peer_port = int(port or TCP_PORT)
+        except Exception:
+            peer_port = TCP_PORT
+        if peer_port < 1 or peer_port > 65535:
+            peer_port = TCP_PORT
+
+        local_candidates = set(get_local_ip_candidates() + [self.local_ip, "127.0.0.1", "::1"])
+        if ip in local_candidates:
+            return False, False
+
+        peer_name = name or f"\u8bbe\u5907 {ip}"
+        peer_family = family or ("IPv6" if is_valid_ipv6(ip) else "IPv4")
+        refresh_needed = False
+        is_new = False
+        with self.peers_lock:
+            old_info = self.peers.get(ip)
+            is_new = old_info is None
+            name_changed = bool(old_info and old_info.get("name") != peer_name)
+            port_changed = bool(old_info and int(old_info.get("port", TCP_PORT) or TCP_PORT) != peer_port)
+            family_changed = bool(old_info and old_info.get("family") != peer_family)
+            self.peers[ip] = {
+                "name": peer_name,
+                "port": peer_port,
+                "last_seen": time.time(),
+                "manual": manual,
+                "family": peer_family
+            }
+            if not self.selected_peer_ip:
+                self.selected_peer_ip = ip
+                refresh_needed = True
+        return is_new, (is_new or name_changed or port_changed or family_changed or refresh_needed)
 
     def add_manual_peer(self):
         """Add a manual receiver as fallback when discovery is unavailable."""
         parsed = parse_peer_address(self.ids.manual_ip_input.text)
         if not parsed:
-            self.add_log("\u8bf7\u8f93\u5165\u6b63\u786e\u7684\u5730\u5740\uff0c\u4f8b\u5982 192.168.1.23 \u6216 192.168.1.23:18889")
+            self.add_log("\u8bf7\u8f93\u5165\u6b63\u786e\u7684\u5730\u5740\uff0c\u4f8b\u5982 192.168.1.23\u3001192.168.1.23:18889 \u6216 [IPv6]:18889")
             return
 
         ip, port = parsed
         try:
             self.local_ip = get_local_ip()
+            self.local_ipv6 = get_local_ipv6_candidates()
         except Exception:
             pass
-        local_candidates = set(get_local_ip_candidates() + [self.local_ip, "127.0.0.1"])
+        local_candidates = set(get_local_ip_candidates() + [self.local_ip, "127.0.0.1", "::1"])
         if ip in local_candidates:
-            self.add_log(f"不能把本机地址 {ip} 添加为接收方。请在另一台设备上查看并输入对方IP。")
+            self.add_log(f"\u4e0d\u80fd\u628a\u672c\u673a\u5730\u5740 {ip} \u6dfb\u52a0\u4e3a\u63a5\u6536\u65b9\u3002\u8bf7\u5728\u53e6\u4e00\u53f0\u8bbe\u5907\u4e0a\u67e5\u770b\u5e76\u8f93\u5165\u5bf9\u65b9IP\u3002")
             return
 
-        name = f"\u624b\u52a8\u8bbe\u5907 {ip}"
-        with self.peers_lock:
-            old = self.peers.get(ip, {})
-            peer_name = old.get("name") or name
-            self.peers[ip] = {
-                "name": peer_name,
-                "port": port,
-                "last_seen": time.time(),
-                "manual": True
-            }
+        old = self.peers.get(ip, {})
+        peer_name = old.get("name") or f"\u624b\u52a8\u8bbe\u5907 {ip}"
+        self._remember_peer(ip, peer_name, port, manual=True)
 
         self.selected_peer_ip = ip
-        self.ids.manual_ip_input.text = f"{ip}:{port}" if port != TCP_PORT else ip
+        self.ids.manual_ip_input.text = format_peer_address(ip, port)
         self.ids.selected_peer_label.text = f"\u5df2\u9009\u62e9\uff1a{peer_name}"
         self._refresh_peer_list_ui()
-        self.add_log(f"\u5df2\u6dfb\u52a0\u5907\u7528\u63a5\u6536\u65b9\uff1a{ip}:{port}")
+        self.add_log(f"\u5df2\u6dfb\u52a0\u5907\u7528\u63a5\u6536\u65b9\uff1a{format_peer_address(ip, port)}")
 
     def _udp_broadcast_sender(self):
         """Broadcast local device info to both global and subnet broadcast addresses."""
@@ -1435,13 +1634,15 @@ class RootWidget(BoxLayout):
                 current_ip = get_local_ip()
                 if is_valid_ipv4(current_ip) and not current_ip.startswith("127."):
                     self.local_ip = current_ip
+                self.local_ipv6 = get_local_ipv6_candidates()
 
                 payload = json.dumps({
                     "app": "lan-code-share",
-                    "version": 2,
+                    "version": 3,
                     "kind": "announce",
                     "name": self.username,
                     "ip": self.local_ip,
+                    "ipv6": self.local_ipv6[:4],
                     "port": TCP_PORT
                 }).encode(ENCODING)
 
@@ -1478,8 +1679,6 @@ class RootWidget(BoxLayout):
                 peer_ip = peer_info.get("ip") or addr[0]
                 if (not is_valid_ipv4(peer_ip)) or peer_ip.startswith("127."):
                     peer_ip = addr[0]
-                if peer_ip == self.local_ip or peer_ip.startswith("127."):
-                    continue
 
                 try:
                     peer_port = int(peer_info.get("port", TCP_PORT))
@@ -1489,25 +1688,26 @@ class RootWidget(BoxLayout):
                     peer_port = TCP_PORT
 
                 peer_name = peer_info.get("name") or f"\u8bbe\u5907 {peer_ip}"
-                refresh_needed = False
-                with self.peers_lock:
-                    old_info = self.peers.get(peer_ip)
-                    is_new = old_info is None
-                    name_changed = bool(old_info and old_info.get("name") != peer_name)
-                    port_changed = bool(old_info and int(old_info.get("port", TCP_PORT) or TCP_PORT) != peer_port)
-                    self.peers[peer_ip] = {
-                        "name": peer_name,
-                        "port": peer_port,
-                        "last_seen": time.time(),
-                        "manual": False
-                    }
-                    if not self.selected_peer_ip:
-                        self.selected_peer_ip = peer_ip
-                        refresh_needed = True
+                changed = False
+                discovered = []
 
+                is_new, need_refresh = self._remember_peer(peer_ip, peer_name, peer_port, manual=False, family="IPv4")
                 if is_new:
-                    self.add_log(f"\u53d1\u73b0\u8bbe\u5907\uff1a{peer_name} ({peer_ip})")
-                if is_new or name_changed or port_changed or refresh_needed:
+                    discovered.append(peer_ip)
+                changed = changed or need_refresh
+
+                for ipv6 in peer_info.get("ipv6", []) or []:
+                    ipv6 = normalize_ipv6_host(str(ipv6))
+                    if not is_valid_ipv6(ipv6) or is_loopback_ip(ipv6):
+                        continue
+                    is_new_v6, need_refresh_v6 = self._remember_peer(ipv6, peer_name, peer_port, manual=False, family="IPv6")
+                    if is_new_v6:
+                        discovered.append(ipv6)
+                    changed = changed or need_refresh_v6
+
+                for found_ip in discovered:
+                    self.add_log(f"\u53d1\u73b0\u8bbe\u5907\uff1a{peer_name} ({found_ip})")
+                if changed:
                     Clock.schedule_once(lambda dt: self._refresh_peer_list_ui(), 0)
             except socket.timeout:
                 continue
@@ -1539,6 +1739,40 @@ class RootWidget(BoxLayout):
             except Exception as e:
                 if self.running:
                     self.add_log(f"连接异常：{e}")
+        server_sock.close()
+
+    def _tcp_server_ipv6(self):
+        """Best-effort IPv6 TCP listener. IPv4 remains the primary fallback."""
+        try:
+            server_sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+        except OSError:
+            return
+        try:
+            server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            if hasattr(socket, "IPV6_V6ONLY"):
+                server_sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+        except Exception:
+            pass
+
+        try:
+            server_sock.bind(("::", TCP_PORT))
+            server_sock.listen(5)
+            server_sock.settimeout(1)
+            self.add_log("IPv6 接收接口已启用")
+        except Exception as e:
+            self.add_log(f"IPv6 接收接口未启用：{e}")
+            server_sock.close()
+            return
+
+        while self.running:
+            try:
+                client_sock, addr = server_sock.accept()
+                threading.Thread(target=self._handle_tcp_client, args=(client_sock, addr), daemon=True).start()
+            except socket.timeout:
+                continue
+            except Exception as e:
+                if self.running:
+                    self.add_log(f"IPv6 连接异常：{e}")
         server_sock.close()
 
     def _handle_tcp_client(self, sock, addr):
@@ -1622,20 +1856,20 @@ class RootWidget(BoxLayout):
 
         try:
             self.local_ip = get_local_ip()
+            self.local_ipv6 = get_local_ipv6_candidates()
         except Exception:
             pass
-        local_candidates = set(get_local_ip_candidates() + [self.local_ip, "127.0.0.1"])
+        local_candidates = set(get_local_ip_candidates() + [self.local_ip, "127.0.0.1", "::1"])
         if target_ip in local_candidates:
             self.add_log(f"发送失败：{target_ip} 是本机地址。请在另一台设备上查看接收方IP，或等待自动发现后选择对方设备。")
             return
 
         target_port = int(peer_info.get("port", TCP_PORT) or TCP_PORT)
-        self.add_log(f"正在向 {peer_info['name']} 发送…")
+        target_address = format_peer_address(target_ip, target_port)
+        self.add_log(f"正在向 {peer_info['name']} ({target_address}) 发送…")
 
         try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-                sock.settimeout(8)
-                sock.connect((target_ip, target_port))
+            with connect_tcp(target_ip, target_port, timeout=8) as sock:
                 payload = json.dumps({
                     "filename": filename,
                     "content": content,
@@ -1692,7 +1926,7 @@ class RootWidget(BoxLayout):
 # ===================== 应用入口 =====================
 class CodeShareApp(App):
     def build(self):
-        self.title = f"\u5c40\u57df\u7f51\u4ee3\u7801\u5206\u4eab {APP_VERSION}"
+        self.title = f"\u5c40\u57df\u7f51\u7a0b\u5e8f\u5206\u4eab {APP_VERSION}"
         self.icon = "assets/icon.png"
         try:
             Builder.load_string(KV_STRING)
