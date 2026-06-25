@@ -47,8 +47,10 @@ ENCODING = "utf-8"
 MAX_PAYLOAD_BYTES = 10 * 1024 * 1024  # 单次分享最大10MB，避免误传超大内容
 MAX_HISTORY_ITEMS = 50
 QR_FILENAME = "pair_qr.png"
-APP_VERSION = "v20260625-ipv6-ui"
+APP_VERSION = "v20260625-pair-ipv6"
 ANDROID_FILE_PICK_REQUEST = 18890
+SEND_RETRY_COUNT = 3
+RECENT_TRANSFER_TTL = 180
 TOKEN_COLORS = {
     Keyword: "8cc8ff",
     Name.Function: "9cdcfe",
@@ -124,8 +126,9 @@ def app_private_dir():
     app = App.get_running_app()
     if app:
         try:
-            if app.user_data_dir:
-                return app.user_data_dir
+            candidate = app.user_data_dir
+            if candidate and writable_directory(candidate):
+                return candidate
         except Exception:
             pass
     return os.getcwd()
@@ -623,6 +626,14 @@ KV_STRING = '''
                     hint_text_color: 0.55, 0.6, 0.7, 1
                     padding: [dp(8), dp(6), dp(8), dp(6)]
                 Button:
+                    text: "粘贴"
+                    size_hint_x: None
+                    width: dp(50)
+                    font_size: sp(11)
+                    background_color: 0.12, 0.16, 0.24, 1
+                    color: 1, 1, 1, 1
+                    on_release: root.paste_peer_address()
+                Button:
                     text: "直连"
                     size_hint_x: None
                     width: dp(56)
@@ -839,6 +850,18 @@ def format_peer_address(ip, port=TCP_PORT):
     return f"{ip}:{port}" if int(port or TCP_PORT) != TCP_PORT else ip
 
 
+def format_direct_address(ip, port=TCP_PORT):
+    if is_valid_ipv6(ip):
+        return f"[{ip}]:{int(port or TCP_PORT)}"
+    return f"{ip}:{int(port or TCP_PORT)}"
+
+
+def preferred_ipv6_address(addresses):
+    valid = [normalize_ipv6_host(str(ip)) for ip in (addresses or []) if is_valid_ipv6(normalize_ipv6_host(str(ip)))]
+    public_or_ula = [ip for ip in valid if not _strip_ipv6_scope(ip).lower().startswith("fe80:")]
+    return (public_or_ula or valid or [None])[0]
+
+
 def parse_peer_address(raw):
     """Parse manual peer input as IPv4/IPv6 with optional port. Returns (ip, port) or None."""
     value = (raw or "").strip().replace(" ", "").replace("\uff1a", ":")
@@ -903,6 +926,12 @@ def connect_tcp(host, port, timeout=8):
     for af, socktype, proto, _canon, sockaddr in addr_infos:
         sock = socket.socket(af, socktype, proto)
         try:
+            try:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+                if hasattr(socket, "TCP_NODELAY"):
+                    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            except Exception:
+                pass
             sock.settimeout(timeout)
             sock.connect(sockaddr)
             return sock
@@ -1001,6 +1030,7 @@ class RootWidget(BoxLayout):
         self.running = True
         self.layout_mode = None
         self.history = []
+        self.recent_transfer_ids = {}
 
         self.ids.save_dir_label.text = self._save_status_text()
         self.update_char_count()
@@ -1197,13 +1227,25 @@ class RootWidget(BoxLayout):
         self.show_code_preview(filename, self.ids.recv_view.text, "接收预览")
 
     def show_pair_qr(self):
-        """显示本机配对二维码，扫码后可看到IP和端口"""
+        """显示本机配对二维码、IPv4/IPv6地址和复制按钮。"""
+        try:
+            self.local_ip = get_local_ip()
+            self.local_ipv6 = get_local_ipv6_candidates()
+            self.ids.save_dir_label.text = self._save_status_text()
+        except Exception:
+            pass
+
+        primary_ipv6 = preferred_ipv6_address(self.local_ipv6)
+        ipv4_direct = format_direct_address(self.local_ip, TCP_PORT)
+        ipv6_direct = format_direct_address(primary_ipv6, TCP_PORT) if primary_ipv6 else ""
         pair_info = {
             "app": "lan-code-share",
             "version": 3,
             "name": self.username,
             "ip": self.local_ip,
             "ipv6": self.local_ipv6[:4],
+            "ipv4_direct": ipv4_direct,
+            "ipv6_direct": ipv6_direct,
             "port": TCP_PORT
         }
         pair_text = json.dumps(pair_info, ensure_ascii=False)
@@ -1211,26 +1253,72 @@ class RootWidget(BoxLayout):
         img = qrcode.make(pair_text)
         img.save(qr_path)
 
-        content = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(12))
-        content.add_widget(Image(source=qr_path, allow_stretch=True, keep_ratio=True))
-        ip_label = Label(
-            text=f"IP: {self.local_ip}    IPv6: {len(self.local_ipv6)}    Port: {TCP_PORT}",
+        content = BoxLayout(orientation="vertical", spacing=dp(10), padding=dp(12))
+        content.add_widget(Image(source=qr_path, allow_stretch=True, keep_ratio=True, size_hint_y=0.54))
+
+        summary = Label(
+            text=f"设备：{self.username}\nIPv4：{ipv4_direct}\nIPv6：{ipv6_direct or '未检测到可用 IPv6'}",
             size_hint_y=None,
-            height=dp(28),
-            font_size=sp(13),
-            color=(0.92, 0.95, 1, 1)
+            height=dp(78),
+            font_size=sp(12),
+            color=(0.92, 0.95, 1, 1),
+            halign="left",
+            valign="middle"
         )
-        copy_btn = Button(text="复制IP", size_hint_y=None, height=dp(38))
-        content.add_widget(ip_label)
-        content.add_widget(copy_btn)
+        summary.bind(size=lambda widget, size: setattr(widget, "text_size", size))
+        content.add_widget(summary)
 
-        popup = Popup(title="本机配对码", content=content, size_hint=(0.6, 0.8))
+        ipv6_box = BoxLayout(orientation="vertical", size_hint_y=None, height=dp(78), spacing=dp(4))
+        ipv6_title = Label(
+            text=f"可用 IPv6 地址（{len(self.local_ipv6)} 个）",
+            size_hint_y=None,
+            height=dp(22),
+            font_size=sp(11),
+            color=(0.55, 0.85, 1, 1),
+            halign="left",
+            valign="middle"
+        )
+        ipv6_title.bind(size=lambda widget, size: setattr(widget, "text_size", size))
+        ipv6_text = "\n".join(format_direct_address(ip, TCP_PORT) for ip in self.local_ipv6[:4]) or "当前网络没有分配 IPv6 地址"
+        ipv6_label = Label(
+            text=ipv6_text,
+            font_size=sp(10),
+            color=(0.76, 0.82, 0.92, 1),
+            halign="left",
+            valign="top"
+        )
+        ipv6_label.bind(size=lambda widget, size: setattr(widget, "text_size", size))
+        ipv6_box.add_widget(ipv6_title)
+        ipv6_box.add_widget(ipv6_label)
+        content.add_widget(ipv6_box)
 
-        def _copy_ip(_):
-            Clipboard.copy(self.local_ip)
-            self.add_log("已复制本机IP")
+        button_row = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(8))
+        copy_ipv4_btn = Button(text="复制IPv4直连", font_size=sp(11), background_color=(0.12, 0.16, 0.24, 1))
+        copy_ipv6_btn = Button(text="复制IPv6直连", font_size=sp(11), background_color=(0.10, 0.48, 0.96, 1), disabled=not bool(ipv6_direct))
+        copy_all_btn = Button(text="复制配对信息", font_size=sp(11), background_color=(0.12, 0.16, 0.24, 1))
+        button_row.add_widget(copy_ipv4_btn)
+        button_row.add_widget(copy_ipv6_btn)
+        button_row.add_widget(copy_all_btn)
+        content.add_widget(button_row)
 
-        copy_btn.bind(on_release=_copy_ip)
+        popup = Popup(title="本机配对码", content=content, size_hint=(0.82, 0.88))
+
+        def _copy_ipv4(_):
+            Clipboard.copy(ipv4_direct)
+            self.add_log(f"已复制 IPv4 直连地址：{ipv4_direct}")
+
+        def _copy_ipv6(_):
+            if ipv6_direct:
+                Clipboard.copy(ipv6_direct)
+                self.add_log(f"已复制 IPv6 直连地址：{ipv6_direct}")
+
+        def _copy_all(_):
+            Clipboard.copy(pair_text)
+            self.add_log("已复制完整配对信息")
+
+        copy_ipv4_btn.bind(on_release=_copy_ipv4)
+        copy_ipv6_btn.bind(on_release=_copy_ipv6)
+        copy_all_btn.bind(on_release=_copy_all)
         popup.open()
 
     def show_history(self):
@@ -1330,6 +1418,20 @@ class RootWidget(BoxLayout):
             self.add_log("已复制接收内容到剪贴板")
         else:
             self.add_log("暂无内容可复制")
+
+    def paste_peer_address(self):
+        """Paste a copied IPv4/IPv6 direct address into the manual connect field."""
+        value = (Clipboard.paste() or "").strip()
+        if not value:
+            self.add_log("剪贴板没有可粘贴的地址")
+            return
+        parsed = parse_peer_address(value)
+        if not parsed:
+            self.add_log("剪贴板内容不是有效的 IPv4/IPv6 直连地址")
+            return
+        ip, port = parsed
+        self.ids.manual_ip_input.text = format_peer_address(ip, port)
+        self.add_log(f"已粘贴直连地址：{format_peer_address(ip, port)}")
 
     # ---------- 文件选择功能 ----------
     def open_file_chooser(self):
@@ -1794,6 +1896,19 @@ class RootWidget(BoxLayout):
             filename = sanitize_filename(payload.get("filename", "unknown.py"))
             code_content = payload.get("content", "")
             sender = payload.get("sender", "未知用户")
+            transfer_id = payload.get("transfer_id")
+
+            now = time.time()
+            for old_id, old_time in list(self.recent_transfer_ids.items()):
+                if now - old_time > RECENT_TRANSFER_TTL:
+                    self.recent_transfer_ids.pop(old_id, None)
+            if transfer_id and transfer_id in self.recent_transfer_ids:
+                try:
+                    sock.sendall(b"OK")
+                except Exception:
+                    pass
+                self.add_log(f"重复传输已确认：{filename}")
+                return
 
             # 切回主线程更新界面
             Clock.schedule_once(lambda dt: self._update_receive_ui(filename, code_content, sender, addr[0]), 0)
@@ -1809,6 +1924,8 @@ class RootWidget(BoxLayout):
                 sock.sendall(b"OK")
             except Exception:
                 pass
+            if transfer_id:
+                self.recent_transfer_ids[transfer_id] = time.time()
             saved_name = os.path.basename(save_path)
             self.add_log(f"接收完成：{filename}，已保存为 {saved_name}")
 
@@ -1866,40 +1983,56 @@ class RootWidget(BoxLayout):
 
         target_port = int(peer_info.get("port", TCP_PORT) or TCP_PORT)
         target_address = format_peer_address(target_ip, target_port)
-        self.add_log(f"正在向 {peer_info['name']} ({target_address}) 发送…")
+        peer_name = peer_info["name"]
+        transfer_id = f"{int(time.time() * 1000)}-{os.getpid()}-{threading.get_ident()}"
+        payload = json.dumps({
+            "filename": filename,
+            "content": content,
+            "sender": self.username,
+            "transfer_id": transfer_id
+        }).encode(ENCODING)
 
-        try:
-            with connect_tcp(target_ip, target_port, timeout=8) as sock:
-                payload = json.dumps({
-                    "filename": filename,
-                    "content": content,
-                    "sender": self.username
-                }).encode(ENCODING)
-                sock.sendall(len(payload).to_bytes(4, 'big'))
-                sock.sendall(payload)
-                try:
-                    sock.settimeout(3)
-                    ack = sock.recv(2)
-                except socket.timeout:
-                    ack = b""
-                if ack != b"OK":
-                    self.add_log("发送完成，但未收到对方确认；请查看接收方记录")
-                    return
-            self.add_log(f"发送成功：{filename}")
-            Clock.schedule_once(
-                lambda dt: self._add_history("sent", filename, content, f"{peer_info['name']} ({target_ip})"),
-                0
-            )
-        except OSError as e:
+        self.add_log(f"正在向 {peer_name} ({target_address}) 发送…")
+
+        last_error = None
+        for attempt in range(1, SEND_RETRY_COUNT + 1):
+            try:
+                if attempt > 1:
+                    self.add_log(f"正在重试发送（{attempt}/{SEND_RETRY_COUNT}）…")
+                with connect_tcp(target_ip, target_port, timeout=8) as sock:
+                    sock.sendall(len(payload).to_bytes(4, 'big'))
+                    sock.sendall(payload)
+                    try:
+                        sock.settimeout(4)
+                        ack = sock.recv(2)
+                    except socket.timeout:
+                        ack = b""
+                    if ack != b"OK":
+                        raise TimeoutError("未收到对方确认")
+
+                self.add_log(f"发送成功：{filename}")
+                Clock.schedule_once(
+                    lambda dt: self._add_history("sent", filename, content, f"{peer_name} ({target_address})"),
+                    0
+                )
+                return
+            except Exception as exc:
+                last_error = exc
+                if attempt < SEND_RETRY_COUNT:
+                    time.sleep(0.7 * attempt)
+
+        if isinstance(last_error, OSError):
             unreachable = {getattr(errno, "EHOSTUNREACH", 113), getattr(errno, "ENETUNREACH", 101), 113, 101}
-            if getattr(e, "errno", None) in unreachable:
+            if getattr(last_error, "errno", None) in unreachable:
                 self.add_log("发送失败：无法到达对方设备。请确认两台设备连接同一Wi-Fi/热点，关闭VPN/移动数据切换；校园网可能开启客户端隔离，需换热点或使用中继模式。")
-            elif getattr(e, "errno", None) in {getattr(errno, "ECONNREFUSED", 111), 111, 10061}:
+            elif getattr(last_error, "errno", None) in {getattr(errno, "ECONNREFUSED", 111), 111, 10061}:
                 self.add_log("发送失败：对方未启动接收服务，或端口被系统/防火墙拦截。请让对方重新打开应用并等待显示已就绪。")
             else:
-                self.add_log(f"发送失败：{str(e)}")
-        except Exception as e:
-            self.add_log(f"发送失败：{str(e)}")
+                self.add_log(f"发送失败：{str(last_error)}")
+        elif last_error:
+            self.add_log(f"发送失败：{str(last_error)}")
+        else:
+            self.add_log("发送失败：未知错误")
 
     def clear_received(self):
         """清空接收区"""
