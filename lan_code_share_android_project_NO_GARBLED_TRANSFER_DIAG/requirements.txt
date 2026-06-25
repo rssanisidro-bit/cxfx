@@ -1,0 +1,5 @@
+kivy
+plyer
+pygments
+qrcode
+pillow
