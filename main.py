@@ -7,6 +7,7 @@ import threading
 import json
 import time
 import re
+import traceback
 from kivy.app import App
 from kivy.uix.boxlayout import BoxLayout
 from kivy.lang import Builder
@@ -194,6 +195,23 @@ def acquire_android_multicast_lock():
     except Exception:
         return None
 
+class ReadOnlyTextInput(TextInput):
+    """Display-only text area that does not open the selection/copy bubble."""
+    def on_touch_down(self, touch):
+        if self.collide_point(*touch.pos):
+            return True
+        return super().on_touch_down(touch)
+
+    def on_touch_move(self, touch):
+        if self.collide_point(*touch.pos):
+            return True
+        return super().on_touch_move(touch)
+
+    def on_touch_up(self, touch):
+        if self.collide_point(*touch.pos):
+            return True
+        return super().on_touch_up(touch)
+
 KV_STRING = '''
 #:import dp kivy.metrics.dp
 #:import sp kivy.metrics.sp
@@ -208,6 +226,9 @@ KV_STRING = '''
     font_name: "CJK"
 
 <TextInput>:
+    font_name: "CJK"
+
+<ReadOnlyTextInput>:
     font_name: "CJK"
 
 <RootWidget>:
@@ -558,13 +579,10 @@ KV_STRING = '''
                 valign: "middle"
                 text_size: self.size
 
-            TextInput:
+            ReadOnlyTextInput:
                 id: recv_view
                 text: ""
                 readonly: True
-                focus: False
-                disabled: True
-                disabled_foreground_color: 0.9, 0.95, 1, 1
                 font_size: sp(12)
                 background_color: 0.05, 0.07, 0.10, 1
                 foreground_color: 0.9, 0.95, 1, 1
@@ -625,12 +643,9 @@ KV_STRING = '''
                 background_color: 0.18, 0.22, 0.30, 1
                 color: 1, 1, 1, 1
                 on_release: root.clear_log()
-        TextInput:
+        ReadOnlyTextInput:
             id: log_view
             readonly: True
-            focus: False
-            disabled: True
-            disabled_foreground_color: 0.65, 0.78, 0.85, 1
             font_size: sp(10)
             background_color: 0.04, 0.05, 0.08, 1
             foreground_color: 0.65, 0.78, 0.85, 1
@@ -768,13 +783,12 @@ def code_to_markup(code, filename="code.py"):
 class RootWidget(BoxLayout):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        # 基础配置
-        self.username = f"用户_{os.getpid()}"
-        self.local_ip = get_local_ip()
-        self.save_dir = default_save_dir()
-        self.multicast_lock = acquire_android_multicast_lock()
+        self.username = f"??_{os.getpid()}"
+        self.local_ip = "127.0.0.1"
+        self.save_dir = app_private_dir()
+        self.multicast_lock = None
+        self.network_started = False
 
-        # 在线成员管理
         self.peers = {}
         self.peers_lock = threading.Lock()
         self.selected_peer_ip = None
@@ -782,36 +796,62 @@ class RootWidget(BoxLayout):
         self.layout_mode = None
         self.history = []
 
-        # 初始化UI
-        self.ids.user_label.text = f"用户：{self.username}"
-        self.ids.save_dir_label.text = f"保存到：{self.save_dir}"
+        self.ids.save_dir_label.text = f"????{self.save_dir}"
         self.update_char_count()
         self._update_responsive_layout(Window.width)
         Window.bind(size=lambda window, size: self._update_responsive_layout(size[0]))
+        Clock.schedule_once(self._post_startup, 0.2)
 
-        # 启动网络线程
-        threading.Thread(target=self._udp_broadcast_sender, daemon=True).start()
-        threading.Thread(target=self._udp_broadcast_receiver, daemon=True).start()
-        threading.Thread(target=self._tcp_server, daemon=True).start()
+    def _post_startup(self, dt):
+        try:
+            request_android_permissions()
+        except Exception as e:
+            self.add_log(f"???????{e}")
 
-        # 定时检查离线设备
-        Clock.schedule_interval(self._check_peer_timeout, 1)
+        try:
+            self.local_ip = get_local_ip()
+        except Exception as e:
+            self.local_ip = "127.0.0.1"
+            self.add_log(f"????IP???{e}")
 
-        self.add_log(f"程序启动，本机IP：{self.local_ip}")
-        self.add_log("正在搜索局域网内的在线设备…")
-        self.add_log("若列表没有出现对方，可让对方查看本机IP后手动直连")
+        try:
+            self.save_dir = default_save_dir()
+            self.ids.save_dir_label.text = f"????{self.save_dir}"
+        except Exception as e:
+            self.add_log(f"??????????{e}")
 
-    # ---------- 基础工具方法 ----------
+        try:
+            self.multicast_lock = acquire_android_multicast_lock()
+        except Exception:
+            self.multicast_lock = None
+
+        if not self.network_started:
+            self.network_started = True
+            for target in (self._udp_broadcast_sender, self._udp_broadcast_receiver, self._tcp_server):
+                try:
+                    threading.Thread(target=target, daemon=True).start()
+                except Exception as e:
+                    self.add_log(f"?????????{e}")
+            Clock.schedule_interval(self._check_peer_timeout, 1)
+
+        self._refresh_header_labels()
+        self.add_log(f"???????IP?{self.local_ip}")
+        self.add_log("??????????????")
+        self.add_log("??????????????????IP?????")
+
     def add_log(self, message):
         """添加状态日志，自动滚动到底部"""
         Clock.schedule_once(lambda dt: self._append_log(message), 0)
 
     def _append_log(self, message):
-        timestamp = time.strftime("%H:%M:%S")
-        self.ids.log_view.text += f"[{timestamp}] {message}\n"
-        lines = self.ids.log_view.text.splitlines()
-        if lines:
-            self.ids.log_view.cursor = (len(lines[-1]), len(lines) - 1)
+        try:
+            timestamp = time.strftime("%H:%M:%S")
+            self.ids.log_view.text += f"[{timestamp}] {message}\n"
+            lines = self.ids.log_view.text.splitlines()
+            if lines and hasattr(self.ids.log_view, "cursor"):
+                self.ids.log_view.cursor = (len(lines[-1]), len(lines) - 1)
+        except Exception:
+            pass
 
     def update_char_count(self):
         """更新输入框字符计数"""
@@ -820,11 +860,11 @@ class RootWidget(BoxLayout):
     def _refresh_header_labels(self):
         """Keep the header readable on both desktop and phone widths."""
         if getattr(self, "layout_mode", None) == "mobile":
-            self.ids.title_label.text = "\u4ee3\u7801\u5206\u4eab"
-            self.ids.user_label.text = f"\u8bbe\u5907\u540d\n{self.username}"
+            self.ids.title_label.text = "????"
+            self.ids.user_label.text = f"???\n{self.username}"
         else:
-            self.ids.title_label.text = "\u5c40\u57df\u7f51\u4ee3\u7801\u5206\u4eab"
-            self.ids.user_label.text = f"\u7528\u6237\uff1a{self.username}"
+            self.ids.title_label.text = "???????"
+            self.ids.user_label.text = f"???{self.username}"
 
     def _update_responsive_layout(self, width):
         """Switch between desktop columns and a phone-friendly stacked layout."""
@@ -1580,11 +1620,23 @@ class RootWidget(BoxLayout):
 # ===================== 应用入口 =====================
 class CodeShareApp(App):
     def build(self):
-        request_android_permissions()
-        Builder.load_string(KV_STRING)
-        self.title = "局域网代码分享"
+        self.title = "???????"
         self.icon = "assets/icon.png"
-        return RootWidget()
+        try:
+            Builder.load_string(KV_STRING)
+            return RootWidget()
+        except Exception:
+            err = traceback.format_exc()
+            try:
+                crash_path = os.path.join(os.getcwd(), "startup_crash.log")
+                with open(crash_path, "w", encoding="utf-8") as f:
+                    f.write(err)
+            except Exception:
+                pass
+            box = BoxLayout(orientation="vertical", padding=dp(12), spacing=dp(8))
+            box.add_widget(Label(text="????????????", size_hint_y=None, height=dp(36)))
+            box.add_widget(Label(text=err, font_size=sp(10), halign="left", valign="top"))
+            return box
 
     def on_stop(self):
         if hasattr(self.root, 'on_stop'):
