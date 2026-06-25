@@ -3,6 +3,7 @@ import os
 os.environ.setdefault("KIVY_NO_ARGS", "1")
 
 import socket
+import errno
 import threading
 import json
 import time
@@ -46,6 +47,7 @@ ENCODING = "utf-8"
 MAX_PAYLOAD_BYTES = 10 * 1024 * 1024  # 单次分享最大10MB，避免误传超大内容
 MAX_HISTORY_ITEMS = 50
 QR_FILENAME = "pair_qr.png"
+APP_VERSION = "v20260625-textfix2"
 ANDROID_FILE_PICK_REQUEST = 18890
 TOKEN_COLORS = {
     Keyword: "8cc8ff",
@@ -175,6 +177,51 @@ def get_android_wifi_ip():
     except Exception:
         return None
     return None
+
+def get_android_interface_ips():
+    """Return IPv4 addresses from Android network interfaces."""
+    if platform != "android":
+        return []
+    ips = []
+    try:
+        from jnius import autoclass
+        NetworkInterface = autoclass("java.net.NetworkInterface")
+        Collections = autoclass("java.util.Collections")
+        interfaces = Collections.list(NetworkInterface.getNetworkInterfaces())
+        for iface in interfaces:
+            try:
+                if not iface.isUp() or iface.isLoopback():
+                    continue
+                addresses = Collections.list(iface.getInetAddresses())
+                for addr in addresses:
+                    host = str(addr.getHostAddress())
+                    if host and ":" not in host and not host.startswith("127.") and host != "0.0.0.0":
+                        if host not in ips:
+                            ips.append(host)
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return ips
+
+
+def get_local_ip_candidates():
+    """Collect local IPv4 candidates for self-address detection."""
+    ips = []
+    for ip in get_android_interface_ips():
+        if ip not in ips:
+            ips.append(ip)
+    try:
+        host_ips = socket.gethostbyname_ex(socket.gethostname())[2]
+        for ip in host_ips:
+            if ip and not ip.startswith("127.") and ip not in ips:
+                ips.append(ip)
+    except Exception:
+        pass
+    last_ip = globals().get("_LAST_LOCAL_IP", "")
+    if last_ip and not last_ip.startswith("127.") and last_ip not in ips:
+        ips.append(last_ip)
+    return ips
 
 def acquire_android_multicast_lock():
     """Keep Wi-Fi broadcast discovery alive on Android when the system is saving power."""
@@ -654,16 +701,23 @@ KV_STRING = '''
 
 # ===================== 工具函数 =====================
 def get_local_ip():
-    """获取本机局域网IP地址"""
+    """Get local LAN IPv4 address."""
     android_ip = get_android_wifi_ip()
     if android_ip:
+        globals()["_LAST_LOCAL_IP"] = android_ip
         return android_ip
+
+    for ip in get_android_interface_ips():
+        globals()["_LAST_LOCAL_IP"] = ip
+        return ip
+
     try:
         test_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         test_socket.connect(("8.8.8.8", 80))
         local_ip = test_socket.getsockname()[0]
         test_socket.close()
         if not local_ip.startswith("127."):
+            globals()["_LAST_LOCAL_IP"] = local_ip
             return local_ip
     except Exception:
         pass
@@ -672,6 +726,7 @@ def get_local_ip():
         hostname = socket.gethostname()
         for ip in socket.gethostbyname_ex(hostname)[2]:
             if not ip.startswith("127."):
+                globals()["_LAST_LOCAL_IP"] = ip
                 return ip
     except Exception:
         pass
@@ -783,7 +838,7 @@ def code_to_markup(code, filename="code.py"):
 class RootWidget(BoxLayout):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.username = f"??_{os.getpid()}"
+        self.username = f"\u8bbe\u5907_{os.getpid()}"
         self.local_ip = "127.0.0.1"
         self.save_dir = app_private_dir()
         self.multicast_lock = None
@@ -796,7 +851,7 @@ class RootWidget(BoxLayout):
         self.layout_mode = None
         self.history = []
 
-        self.ids.save_dir_label.text = f"????{self.save_dir}"
+        self.ids.save_dir_label.text = f"{APP_VERSION}    \u672c\u673aIP\uff1a\u83b7\u53d6\u4e2d    \u4fdd\u5b58\u5230\uff1a{self.save_dir}"
         self.update_char_count()
         self._update_responsive_layout(Window.width)
         Window.bind(size=lambda window, size: self._update_responsive_layout(size[0]))
@@ -806,19 +861,19 @@ class RootWidget(BoxLayout):
         try:
             request_android_permissions()
         except Exception as e:
-            self.add_log(f"???????{e}")
+            self.add_log(f"权限请求跳过：{e}")
 
         try:
             self.local_ip = get_local_ip()
         except Exception as e:
             self.local_ip = "127.0.0.1"
-            self.add_log(f"????IP???{e}")
+            self.add_log(f"获取本机IP失败：{e}")
 
         try:
             self.save_dir = default_save_dir()
-            self.ids.save_dir_label.text = f"????{self.save_dir}"
+            self.ids.save_dir_label.text = f"{APP_VERSION}    \u672c\u673aIP\uff1a{self.local_ip}    \u4fdd\u5b58\u5230\uff1a{self.save_dir}"
         except Exception as e:
-            self.add_log(f"??????????{e}")
+            self.add_log(f"保存目录初始化失败：{e}")
 
         try:
             self.multicast_lock = acquire_android_multicast_lock()
@@ -831,13 +886,13 @@ class RootWidget(BoxLayout):
                 try:
                     threading.Thread(target=target, daemon=True).start()
                 except Exception as e:
-                    self.add_log(f"?????????{e}")
+                    self.add_log(f"网络线程启动失败：{e}")
             Clock.schedule_interval(self._check_peer_timeout, 1)
 
         self._refresh_header_labels()
-        self.add_log(f"???????IP?{self.local_ip}")
-        self.add_log("??????????????")
-        self.add_log("??????????????????IP?????")
+        self.add_log(f"程序启动，本机IP：{self.local_ip}")
+        self.add_log("正在搜索局域网内的在线设备…")
+        self.add_log("若列表没有出现对方，请确认两台设备在同一Wi-Fi/热点，或手动输入对方IP直连")
 
     def add_log(self, message):
         """添加状态日志，自动滚动到底部"""
@@ -860,11 +915,11 @@ class RootWidget(BoxLayout):
     def _refresh_header_labels(self):
         """Keep the header readable on both desktop and phone widths."""
         if getattr(self, "layout_mode", None) == "mobile":
-            self.ids.title_label.text = "????"
-            self.ids.user_label.text = f"???\n{self.username}"
+            self.ids.title_label.text = f"\u4ee3\u7801\u5206\u4eab {APP_VERSION}"
+            self.ids.user_label.text = f"\u8bbe\u5907\u540d\n{self.username}"
         else:
-            self.ids.title_label.text = "???????"
-            self.ids.user_label.text = f"???{self.username}"
+            self.ids.title_label.text = f"\u5c40\u57df\u7f51\u4ee3\u7801\u5206\u4eab {APP_VERSION}"
+            self.ids.user_label.text = f"\u7528\u6237\uff1a{self.username}"
 
     def _update_responsive_layout(self, width):
         """Switch between desktop columns and a phone-friendly stacked layout."""
@@ -1340,8 +1395,13 @@ class RootWidget(BoxLayout):
             return
 
         ip, port = parsed
-        if ip == self.local_ip:
-            self.add_log("\u4e0d\u80fd\u628a\u672c\u673a IP \u6dfb\u52a0\u4e3a\u63a5\u6536\u65b9")
+        try:
+            self.local_ip = get_local_ip()
+        except Exception:
+            pass
+        local_candidates = set(get_local_ip_candidates() + [self.local_ip, "127.0.0.1"])
+        if ip in local_candidates:
+            self.add_log(f"不能把本机地址 {ip} 添加为接收方。请在另一台设备上查看并输入对方IP。")
             return
 
         name = f"\u624b\u52a8\u8bbe\u5907 {ip}"
@@ -1553,28 +1613,34 @@ class RootWidget(BoxLayout):
         ).start()
 
     def _send_code_thread(self, target_ip, filename, content):
-        """发送代码子线程，避免阻塞UI"""
+        """Send code in a worker thread."""
         with self.peers_lock:
             peer_info = self.peers.get(target_ip)
         if not peer_info:
             self.add_log("接收方已离线")
             return
 
-        target_port = peer_info["port"]
+        try:
+            self.local_ip = get_local_ip()
+        except Exception:
+            pass
+        local_candidates = set(get_local_ip_candidates() + [self.local_ip, "127.0.0.1"])
+        if target_ip in local_candidates:
+            self.add_log(f"发送失败：{target_ip} 是本机地址。请在另一台设备上查看接收方IP，或等待自动发现后选择对方设备。")
+            return
+
+        target_port = int(peer_info.get("port", TCP_PORT) or TCP_PORT)
         self.add_log(f"正在向 {peer_info['name']} 发送…")
 
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
                 sock.settimeout(8)
                 sock.connect((target_ip, target_port))
-
                 payload = json.dumps({
                     "filename": filename,
                     "content": content,
                     "sender": self.username
                 }).encode(ENCODING)
-
-                # 先发送数据长度，再发送实际内容
                 sock.sendall(len(payload).to_bytes(4, 'big'))
                 sock.sendall(payload)
                 try:
@@ -1583,18 +1649,24 @@ class RootWidget(BoxLayout):
                 except socket.timeout:
                     ack = b""
                 if ack != b"OK":
-                    self.add_log("\u53d1\u9001\u5b8c\u6210\uff0c\u4f46\u672a\u6536\u5230\u5bf9\u65b9\u786e\u8ba4\uff1b\u8bf7\u67e5\u770b\u63a5\u6536\u65b9\u8bb0\u5f55")
+                    self.add_log("发送完成，但未收到对方确认；请查看接收方记录")
                     return
             self.add_log(f"发送成功：{filename}")
             Clock.schedule_once(
                 lambda dt: self._add_history("sent", filename, content, f"{peer_info['name']} ({target_ip})"),
                 0
             )
-
+        except OSError as e:
+            unreachable = {getattr(errno, "EHOSTUNREACH", 113), getattr(errno, "ENETUNREACH", 101), 113, 101}
+            if getattr(e, "errno", None) in unreachable:
+                self.add_log("发送失败：无法到达对方设备。请确认两台设备连接同一Wi-Fi/热点，关闭VPN/移动数据切换；校园网可能开启客户端隔离，需换热点或使用中继模式。")
+            elif getattr(e, "errno", None) in {getattr(errno, "ECONNREFUSED", 111), 111, 10061}:
+                self.add_log("发送失败：对方未启动接收服务，或端口被系统/防火墙拦截。请让对方重新打开应用并等待显示已就绪。")
+            else:
+                self.add_log(f"发送失败：{str(e)}")
         except Exception as e:
             self.add_log(f"发送失败：{str(e)}")
 
-    # ---------- 清空功能 ----------
     def clear_received(self):
         """清空接收区"""
         self.ids.recv_filename.text = "—"
@@ -1620,7 +1692,7 @@ class RootWidget(BoxLayout):
 # ===================== 应用入口 =====================
 class CodeShareApp(App):
     def build(self):
-        self.title = "???????"
+        self.title = f"\u5c40\u57df\u7f51\u4ee3\u7801\u5206\u4eab {APP_VERSION}"
         self.icon = "assets/icon.png"
         try:
             Builder.load_string(KV_STRING)
@@ -1634,7 +1706,7 @@ class CodeShareApp(App):
             except Exception:
                 pass
             box = BoxLayout(orientation="vertical", padding=dp(12), spacing=dp(8))
-            box.add_widget(Label(text="????????????", size_hint_y=None, height=dp(36)))
+            box.add_widget(Label(text="启动失败，错误信息如下：", size_hint_y=None, height=dp(36)))
             box.add_widget(Label(text=err, font_size=sp(10), halign="left", valign="top"))
             return box
 

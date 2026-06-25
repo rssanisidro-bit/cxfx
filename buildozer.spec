@@ -5,7 +5,7 @@ package.domain = org.tju.challenge
 source.dir = .
 source.include_exts = py,png,jpg,jpeg,kv,atlas,md,txt,java,ttf,ttc,json
 source.exclude_dirs = __pycache__,.buildozer,bin
-version = 1.0
+version = 1.2
 requirements = python3,kivy,pyjnius,plyer,pygments,qrcode,pillow
 icon.filename = assets/icon.png
 orientation = portrait
@@ -22,3 +22,5 @@ android.add_src = android_src
 [buildozer]
 log_level = 2
 warn_on_root = 1
+
+android.numeric_version = 12
